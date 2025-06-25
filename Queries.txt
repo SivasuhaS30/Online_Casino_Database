@@ -1,0 +1,414 @@
+ -- Basic Queries
+
+-- Get all high-roller customers (wallet balance > 5000)
+SELECT Customer_Name, Wallet_Balance 
+FROM Customer 
+WHERE Wallet_Balance > 5000 
+ORDER BY Wallet_Balance DESC;
+
+-- Find all dealers working the night shift
+SELECT Name, Employee_Type, Shift_Start, Shift_End 
+FROM Employee 
+WHERE Employee_Type = 'Dealer' AND Shift_Start >= '18:00:00';
+
+-- List games with payout rate above 90%
+SELECT Game_Name, Payout_Rate 
+FROM Games 
+WHERE Payout_Rate > 90 
+ORDER BY Payout_Rate DESC;
+
+
+
+--Join Queries
+
+-- Show all transactions with customer details
+SELECT t.Transaction_ID, c.Customer_Name, t.Amount, t.Timestamp, t.Deposit_Withdrawal
+FROM Transactions t
+JOIN Customer c ON t.Customer_ID = c.Customer_ID;
+
+-- List all game participations with game and customer info
+SELECT pt.Table_ID, g.Game_Name, c.Customer_Name, pt.Bet_Amount, pt.Start_Time
+FROM Participation_Table pt
+JOIN Games g ON pt.Game_ID = g.Game_ID
+JOIN Customer c ON pt.Customer_ID = c.Customer_ID;
+
+-- Find unresolved customer complaints with assigned staff
+SELECT cs.Complain_ID, c.Customer_Name, i.Issue_Type, e.Name AS Assigned_Staff
+FROM Customer_Support cs
+JOIN Customer c ON cs.Customer_ID = c.Customer_ID
+JOIN Issue i ON cs.Complain_ID = i.Complain_ID
+JOIN Employee e ON cs.Employee_ID = e.Employee_ID
+WHERE cs.Status = FALSE;
+
+
+
+-- Aggregate Queries
+
+-- Calculate total deposits and withdrawals per customer
+SELECT 
+    c.Customer_Name,
+    SUM(CASE WHEN t.Deposit_Withdrawal = 'Deposit' THEN t.Amount ELSE 0 END) AS Total_Deposits,
+    SUM(CASE WHEN t.Deposit_Withdrawal = 'Withdrawal' THEN t.Amount ELSE 0 END) AS Total_Withdrawals
+FROM Transactions t
+JOIN Customer c ON t.Customer_ID = c.Customer_ID
+GROUP BY c.Customer_Name;
+
+-- Find average bet amount per game type
+SELECT gt.Game_Type, AVG(pt.Bet_Amount) AS Avg_Bet_Amount
+FROM Participation_Table pt
+JOIN Games g ON pt.Game_ID = g.Game_ID
+JOIN Game_Type gt ON g.Game_ID = gt.Game_ID
+GROUP BY gt.Game_Type;
+
+-- Count number of participations per table
+SELECT Table_ID, COUNT(*) AS Participation_Count
+FROM Participation_Table
+GROUP BY Table_ID
+ORDER BY Participation_Count DESC;
+
+
+
+-- Update Queries
+
+-- Add loyalty points to customers who participated in games today
+UPDATE Customer
+SET Loyalty_Point = Loyalty_Point + 10
+WHERE Customer_ID IN (
+    SELECT DISTINCT Customer_ID 
+    FROM Participation_Table 
+    WHERE DATE(Start_Time) = CURRENT_DATE
+);
+
+-- Increase salary for all dealers by 5%
+UPDATE Employee
+SET Salary = Salary * 1.05
+WHERE Employee_Type = 'Dealer';
+
+
+-- Complex Analytical Queries
+
+-- Calculate house profit per game (total bets - total payouts)
+SELECT 
+    g.Game_Name,
+    SUM(pt.Bet_Amount) AS Total_Bets,
+    SUM(gor.Amount) AS Total_Payouts,
+    SUM(pt.Bet_Amount) - SUM(gor.Amount) AS House_Profit
+FROM Participation_Table pt
+JOIN Games g ON pt.Game_ID = g.Game_ID
+JOIN Game_Outcome_R1 gor ON pt.Table_ID = gor.Table_ID AND pt.Participant_ID = gor.Participant_ID
+GROUP BY g.Game_Name
+ORDER BY House_Profit DESC;
+
+
+-- Identify peak gaming hours
+SELECT 
+    date_part('hour', Start_Time) AS Hour_of_Day,
+    COUNT(*) AS Game_Count,
+    SUM(Bet_Amount) AS Total_Bets
+FROM Participation_Table
+GROUP BY date_part('hour', Start_Time)
+ORDER BY Game_Count DESC;
+
+
+
+ 
+
+
+-- This query provides a customer value analysis report showing each customer's deposit/withdrawal totals, net value, games played, most profitable game for the casino, and their ranking by overall value to the business.
+
+SELECT 
+    c.Customer_ID,
+    c.Customer_Name,
+    -- Financial metrics
+    SUM(CASE WHEN t.Deposit_Withdrawal = 'Deposit' THEN t.Amount ELSE 0 END) AS total_deposits,
+    SUM(CASE WHEN t.Deposit_Withdrawal = 'Withdrawal' THEN t.Amount ELSE 0 END) AS total_withdrawals,
+    SUM(CASE WHEN t.Deposit_Withdrawal = 'Deposit' THEN t.Amount ELSE -t.Amount END) AS net_deposit,
+    -- Game activity
+    COUNT(DISTINCT pt.Game_ID) AS games_played_count,
+    STRING_AGG(DISTINCT g.Game_Name, ', ' ORDER BY g.Game_Name) AS games_played,
+    -- Most profitable game for customer (simplified calculation)
+    (
+        SELECT g.Game_Name 
+        FROM Participation_Table pt2
+        JOIN Games g ON pt2.Game_ID = g.Game_ID
+        WHERE pt2.Customer_ID = c.Customer_ID
+        GROUP BY g.Game_Name, g.Payout_Rate
+        ORDER BY SUM(pt2.Bet_Amount) * (100 - g.Payout_Rate)/100 DESC
+        LIMIT 1
+    ) AS most_profitable_game,
+    -- Customer ranking
+    RANK() OVER (ORDER BY SUM(CASE WHEN t.Deposit_Withdrawal = 'Deposit' THEN t.Amount ELSE -t.Amount END) DESC) AS customer_value_rank
+FROM Customer c
+LEFT JOIN Transactions t ON c.Customer_ID = t.Customer_ID
+LEFT JOIN Participation_Table pt ON c.Customer_ID = pt.Customer_ID
+LEFT JOIN Games g ON pt.Game_ID = g.Game_ID
+GROUP BY c.Customer_ID, c.Customer_Name
+ORDER BY customer_value_rank;
+
+
+
+
+
+
+
+
+
+
+
+-- This query generates an employee performance report showing gaming metrics (tables managed, bets handled) and support metrics (complaints resolved) for dealers and support staff, with calculated resolution rates, rankings by performance type, and an overall weighted score combining both metrics.
+
+SELECT 
+    e.Employee_ID,
+    e.Name,
+    e.Employee_Type,
+    -- Gaming performance metrics
+    COUNT(DISTINCT pt.Table_ID) AS tables_managed,
+    COUNT(DISTINCT pt.Customer_ID) AS unique_customers,
+    SUM(pt.Bet_Amount) AS total_bets_handled,
+    AVG(gor.Amount) AS avg_payout,
+    -- Support performance metrics
+    COUNT(cs.Complain_ID) AS total_complaints,
+    SUM(CASE WHEN cs.Status = TRUE THEN 1 ELSE 0 END) AS resolved_complaints,
+    STRING_AGG(DISTINCT i.Issue_Type, ', ' ORDER BY i.Issue_Type) AS issue_types_handled,
+    -- Calculated metrics
+    CASE 
+        WHEN COUNT(cs.Complain_ID) = 0 THEN 100
+        ELSE SUM(CASE WHEN cs.Status = TRUE THEN 1 ELSE 0 END) * 100.0 / COUNT(cs.Complain_ID)
+    END AS resolution_rate,
+    -- Rankings
+    RANK() OVER (PARTITION BY e.Employee_Type ORDER BY SUM(pt.Bet_Amount) DESC) AS bet_handling_rank,
+    RANK() OVER (PARTITION BY e.Employee_Type 
+                ORDER BY CASE 
+                    WHEN COUNT(cs.Complain_ID) = 0 THEN 100
+                    ELSE SUM(CASE WHEN cs.Status = TRUE THEN 1 ELSE 0 END) * 100.0 / COUNT(cs.Complain_ID)
+                END DESC) AS resolution_rank
+FROM Employee e
+LEFT JOIN Participation_Table pt ON e.Employee_ID = pt.Employee_ID
+LEFT JOIN Game_Outcome_R1 gor ON pt.Table_ID = gor.Table_ID AND pt.Participant_ID = gor.Participant_ID
+LEFT JOIN Customer_Support cs ON e.Employee_ID = cs.Employee_ID
+LEFT JOIN Issue i ON cs.Complain_ID = i.Complain_ID
+WHERE e.Employee_Type IN ('Dealer', 'Support Staff')
+GROUP BY e.Employee_ID, e.Name, e.Employee_Type
+ORDER BY 
+    e.Employee_Type,
+    (SUM(pt.Bet_Amount) * 0.6 + 
+     CASE 
+        WHEN COUNT(cs.Complain_ID) = 0 THEN 100 
+        ELSE SUM(CASE WHEN cs.Status = TRUE THEN 1 ELSE 0 END) * 100.0 / COUNT(cs.Complain_ID)
+     END * 0.4) DESC;
+
+
+
+
+
+
+
+
+
+
+
+-- Game performance report showing profitability metrics, player segmentation, and rankings by game type and payout variance.
+
+SELECT 
+    g.Game_ID,
+    g.Game_Name,
+    gt.Game_Type,
+    g.Payout_Rate,
+    (100 - g.Payout_Rate) AS house_edge,
+    -- Basic game metrics
+    COUNT(DISTINCT pt.Table_ID) AS sessions_count,
+    COUNT(DISTINCT pt.Customer_ID) AS unique_players,
+    SUM(pt.Bet_Amount) AS total_bets,
+    SUM(gor.Amount) AS total_payouts,
+    -- Profit calculations
+    SUM(pt.Bet_Amount) - SUM(gor.Amount) AS gross_profit,
+    (SUM(pt.Bet_Amount) - SUM(gor.Amount)) / NULLIF(SUM(pt.Bet_Amount), 0) * 100 AS actual_payout_rate,
+    -- Customer segmentation
+    CASE 
+        WHEN c.Wallet_Balance < 5000 THEN 'Low Roller'
+        WHEN c.Wallet_Balance BETWEEN 5000 AND 20000 THEN 'Medium Roller'
+        ELSE 'High Roller'
+    END AS customer_segment,
+    COUNT(DISTINCT CASE 
+        WHEN c.Wallet_Balance < 5000 THEN pt.Customer_ID
+        WHEN c.Wallet_Balance BETWEEN 5000 AND 20000 THEN pt.Customer_ID
+        ELSE pt.Customer_ID
+    END) AS segment_players,
+    SUM(CASE 
+        WHEN c.Wallet_Balance < 5000 THEN pt.Bet_Amount
+        WHEN c.Wallet_Balance BETWEEN 5000 AND 20000 THEN pt.Bet_Amount
+        ELSE pt.Bet_Amount
+    END) AS segment_bets,
+    AVG(CASE 
+        WHEN c.Wallet_Balance < 5000 THEN pt.Bet_Amount
+        WHEN c.Wallet_Balance BETWEEN 5000 AND 20000 THEN pt.Bet_Amount
+        ELSE pt.Bet_Amount
+    END) AS avg_bet_amount,
+    -- Rankings
+    RANK() OVER (PARTITION BY gt.Game_Type ORDER BY SUM(pt.Bet_Amount) - SUM(gor.Amount) DESC) AS profitability_rank_by_type,
+    RANK() OVER (ORDER BY ABS(
+        (SUM(pt.Bet_Amount) - SUM(gor.Amount)) / NULLIF(SUM(pt.Bet_Amount), 0) * 100 - g.Payout_Rate
+    ) DESC) AS payout_variance_rank
+FROM Games g
+JOIN Game_Type gt ON g.Game_ID = gt.Game_ID
+LEFT JOIN Participation_Table pt ON g.Game_ID = pt.Game_ID
+LEFT JOIN Game_Outcome_R1 gor ON pt.Table_ID = gor.Table_ID AND pt.Participant_ID = gor.Participant_ID
+LEFT JOIN Customer c ON pt.Customer_ID = c.Customer_ID
+GROUP BY 
+    g.Game_ID, 
+    g.Game_Name, 
+    gt.Game_Type, 
+    g.Payout_Rate,
+    CASE 
+        WHEN c.Wallet_Balance < 5000 THEN 'Low Roller'
+        WHEN c.Wallet_Balance BETWEEN 5000 AND 20000 THEN 'Medium Roller'
+        ELSE 'High Roller'
+    END
+ORDER BY 
+    gross_profit DESC, 
+    Game_Type, 
+    customer_segment;
+
+
+
+
+
+
+
+
+
+
+
+
+-- Daily financial report showing deposits, withdrawals, net flow, running balance, payment methods, top customers, and largest transactions.
+
+WITH daily_transactions AS (
+    SELECT 
+        DATE(Timestamp) AS transaction_date,
+        Transaction_Type,
+        Deposit_Withdrawal,
+        COUNT(*) AS transaction_count,
+        SUM(Amount) AS total_amount,
+        AVG(Amount) AS avg_amount
+    FROM Transactions
+    GROUP BY DATE(Timestamp), Transaction_Type, Deposit_Withdrawal
+),
+customer_activity AS (
+    SELECT 
+        c.Customer_ID,
+        c.Customer_Name,
+        c.Registration_Date,
+        COUNT(DISTINCT DATE(t.Timestamp)) AS active_days,
+        COUNT(DISTINCT CASE WHEN t.Deposit_Withdrawal = 'Deposit' THEN t.Transaction_ID END) AS deposit_count,
+        SUM(CASE WHEN t.Deposit_Withdrawal = 'Deposit' THEN t.Amount ELSE 0 END) AS total_deposits,
+        COUNT(DISTINCT CASE WHEN t.Deposit_Withdrawal = 'Withdrawal' THEN t.Transaction_ID END) AS withdrawal_count,
+        SUM(CASE WHEN t.Deposit_Withdrawal = 'Withdrawal' THEN t.Amount ELSE 0 END) AS total_withdrawals,
+        COUNT(DISTINCT pt.Game_ID) AS games_played_count,
+        COUNT(DISTINCT pt.Table_ID) AS gaming_sessions
+    FROM Customer c
+    LEFT JOIN Transactions t ON c.Customer_ID = t.Customer_ID
+    LEFT JOIN Participation_Table pt ON c.Customer_ID = pt.Customer_ID
+    GROUP BY c.Customer_ID, c.Customer_Name, c.Registration_Date
+),
+financial_metrics AS (
+    SELECT 
+        transaction_date,
+        SUM(CASE WHEN Deposit_Withdrawal = 'Deposit' THEN total_amount ELSE 0 END) AS daily_deposits,
+        SUM(CASE WHEN Deposit_Withdrawal = 'Withdrawal' THEN total_amount ELSE 0 END) AS daily_withdrawals,
+        SUM(CASE WHEN Deposit_Withdrawal = 'Deposit' THEN total_amount ELSE 0 END) - 
+        SUM(CASE WHEN Deposit_Withdrawal = 'Withdrawal' THEN total_amount ELSE 0 END) AS net_daily_flow,
+        SUM(SUM(CASE WHEN Deposit_Withdrawal = 'Deposit' THEN total_amount ELSE 0 END) - 
+            SUM(CASE WHEN Deposit_Withdrawal = 'Withdrawal' THEN total_amount ELSE 0 END)) OVER (ORDER BY transaction_date) AS running_balance,
+        AVG(SUM(CASE WHEN Deposit_Withdrawal = 'Deposit' THEN total_amount ELSE 0 END) - 
+            SUM(CASE WHEN Deposit_Withdrawal = 'Withdrawal' THEN total_amount ELSE 0 END)) OVER (ORDER BY transaction_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS weekly_avg_flow
+    FROM daily_transactions
+    GROUP BY transaction_date
+)
+SELECT 
+    fm.transaction_date,
+    fm.daily_deposits,
+    fm.daily_withdrawals,
+    fm.net_daily_flow,
+    fm.running_balance,
+    fm.weekly_avg_flow,
+    (
+        SELECT STRING_AGG(DISTINCT Transaction_Type, ', ' ORDER BY Transaction_Type)
+        FROM daily_transactions dt
+        WHERE dt.transaction_date = fm.transaction_date
+    ) AS payment_methods_used,
+    (
+        SELECT Customer_Name
+        FROM customer_activity ca
+        JOIN Transactions t ON ca.Customer_ID = t.Customer_ID
+        WHERE DATE(t.Timestamp) = fm.transaction_date
+        ORDER BY t.Amount DESC
+        LIMIT 1
+    ) AS top_customer_name,
+    (
+        SELECT MAX(t.Amount)
+        FROM Transactions t
+        WHERE DATE(t.Timestamp) = fm.transaction_date AND t.Deposit_Withdrawal = 'Deposit'
+    ) AS largest_deposit,
+    (
+        SELECT MAX(t.Amount)
+        FROM Transactions t
+        WHERE DATE(t.Timestamp) = fm.transaction_date AND t.Deposit_Withdrawal = 'Withdrawal'
+    ) AS largest_withdrawal
+FROM financial_metrics fm
+ORDER BY fm.transaction_date;
+
+
+
+
+
+
+
+
+
+
+
+
+
+-- Customer Gaming Activity with Financial and Support Metrics
+SELECT 
+    c.Customer_ID,
+    c.Customer_Name,
+    c.Registration_Date,
+    c.Wallet_Balance,
+    c.Loyalty_Point,
+    -- Transaction metrics
+    COUNT(DISTINCT t.Transaction_ID) AS total_transactions,
+    SUM(CASE WHEN t.Deposit_Withdrawal = 'Deposit' THEN t.Amount ELSE 0 END) AS total_deposits,
+    SUM(CASE WHEN t.Deposit_Withdrawal = 'Withdrawal' THEN t.Amount ELSE 0 END) AS total_withdrawals,
+    (SUM(CASE WHEN t.Deposit_Withdrawal = 'Deposit' THEN t.Amount ELSE 0 END) - 
+     SUM(CASE WHEN t.Deposit_Withdrawal = 'Withdrawal' THEN t.Amount ELSE 0 END)) AS net_deposit,
+    -- Gaming activity metrics
+    COUNT(DISTINCT pt.Table_ID) AS gaming_sessions,
+    COUNT(DISTINCT pt.Game_ID) AS games_played,
+    STRING_AGG(DISTINCT g.Game_Name, ', ' ORDER BY g.Game_Name) AS games_list,
+    SUM(pt.Bet_Amount) AS total_bets,
+    -- Game outcomes
+    SUM(gor.Amount) AS total_winnings,
+    (SUM(gor.Amount) - SUM(pt.Bet_Amount)) AS net_winnings,
+    -- Support interactions
+    COUNT(DISTINCT cs.Complain_ID) AS support_tickets,
+    STRING_AGG(DISTINCT i.Issue_Type, ', ' ORDER BY i.Issue_Type) AS issue_types,
+    SUM(CASE WHEN cs.Status = TRUE THEN 1 ELSE 0 END) AS resolved_tickets,
+    -- Customer classification
+    CASE 
+        WHEN c.Wallet_Balance > 15000 THEN 'High Roller'
+        WHEN c.Wallet_Balance BETWEEN 5000 AND 15000 THEN 'Medium Roller'
+        ELSE 'Low Roller'
+    END AS customer_category,
+    -- Last activity
+    MAX(t.Timestamp) AS last_transaction_date,
+    MAX(pt.Start_Time) AS last_gaming_session
+FROM Customer c
+LEFT JOIN Transactions t ON c.Customer_ID = t.Customer_ID
+LEFT JOIN Participation_Table pt ON c.Customer_ID = pt.Customer_ID
+LEFT JOIN Games g ON pt.Game_ID = g.Game_ID
+LEFT JOIN Game_Outcome_R1 gor ON pt.Table_ID = gor.Table_ID AND pt.Participant_ID = gor.Participant_ID
+LEFT JOIN Customer_Support cs ON c.Customer_ID = cs.Customer_ID
+LEFT JOIN Issue i ON cs.Complain_ID = i.Complain_ID
+GROUP BY c.Customer_ID, c.Customer_Name, c.Registration_Date, c.Wallet_Balance, c.Loyalty_Point
+ORDER BY net_deposit DESC, total_bets DESC;
